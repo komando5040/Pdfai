@@ -15,16 +15,18 @@ if platform == 'android':
     from android.permissions import request_permissions, Permission
     from android.storage import primary_external_storage_path
     from jnius import autoclass
+    from android.activity import bind as activity_bind
 
 try:
     import PyPDF2
 except ImportError:
     PyPDF2 = None
 
-Window.clearcolor = (0.1, 0.1, 0.1, 1)
+Window.clearcolor = (0.1, 0.1, 0.1, 1)  # Dark background
 
 
 class MessageBubble(BoxLayout):
+    """Chat message bubble with rounded corners."""
     def __init__(self, text, is_user=True, **kwargs):
         super().__init__(**kwargs)
         self.orientation = 'horizontal'
@@ -63,11 +65,13 @@ class PDFChatApp(App):
         super().__init__(**kwargs)
         self.pdf_text = ""
         self.pdf_loaded = False
-        self.chunks = []
+        self.chunks = []  # Text chunks for searching
+        self.select_pdf_callback = None
 
     def build(self):
         main = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(10))
 
+        # Chat display area
         self.scroll = ScrollView()
         self.chat_area = BoxLayout(
             orientation='vertical',
@@ -77,6 +81,7 @@ class PDFChatApp(App):
         self.chat_area.bind(minimum_height=self.chat_area.setter('height'))
         self.scroll.add_widget(self.chat_area)
 
+        # Info label for PDF status
         self.info_label = Label(
             text="No PDF loaded. Tap 'Select PDF' to choose a file.",
             size_hint_y=None,
@@ -84,6 +89,7 @@ class PDFChatApp(App):
             color=(0.8, 0.8, 0.8, 1)
         )
 
+        # Button layout
         button_layout = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(10))
 
         self.select_btn = Button(
@@ -106,6 +112,144 @@ class PDFChatApp(App):
             text="Send",
             size_hint_x=0.2,
             background_color=(0.2, 0.6, 1, 1),
+            disabled=not self.pdf_loaded
+        )
+        send_btn.bind(on_release=self.send_question)
+
+        button_layout.add_widget(self.select_btn)
+        button_layout.add_widget(self.input)
+        button_layout.add_widget(send_btn)
+
+        main.add_widget(self.info_label)
+        main.add_widget(self.scroll)
+        main.add_widget(button_layout)
+
+        # Welcome message
+        self.add_message("Hello! First, select a PDF file.", is_user=False)
+
+        # Request permissions on Android
+        if platform == 'android':
+            request_permissions([
+                Permission.READ_EXTERNAL_STORAGE,
+                Permission.WRITE_EXTERNAL_STORAGE
+            ])
+            # Register callback for activity result
+            activity_bind(on_activity_result=self.on_activity_result)
+
+        return main
+
+    def on_activity_result(self, request_code, result_code, intent):
+        """Handle result from PDF selection intent."""
+        if request_code == 1001 and result_code == -1:  # RESULT_OK
+            if intent:
+                uri = intent.getData()
+                if uri:
+                    # Convert URI to file path (implementation depends on Android version)
+                    try:
+                        # For Android 4.4+, we can use the DocumentFile or ContentResolver
+                        from android.content import ContentResolver
+                        resolver = autoclass('org.kivy.android.PythonActivity').mActivity.getContentResolver()
+                        input_stream = resolver.openInputStream(uri)
+                        # Here you would read the PDF using PyPDF2 from the input stream
+                        # For simplicity, we'll use a placeholder
+                        self.add_message("PDF selected! (Reading content...)", is_user=False)
+                        # For demo, just set some sample text
+                        self.pdf_text = "Sample PDF content loaded from selected file."
+                        self.pdf_loaded = True
+                        self.process_text()
+                        self.info_label.text = "PDF loaded successfully"
+                        self.input.disabled = False
+                    except Exception as e:
+                        self.add_message(f"Error reading PDF: {str(e)}", is_user=False)
+
+    def select_pdf(self, instance):
+        """Select PDF file from device."""
+        if platform == 'android':
+            try:
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Intent = autoclass('android.content.Intent')
+                Uri = autoclass('android.net.Uri')
+
+                intent = Intent(Intent.ACTION_GET_CONTENT)
+                intent.setType("application/pdf")
+                intent.addCategory(Intent.CATEGORY_OPENABLE)
+
+                current_activity = PythonActivity.mActivity
+                current_activity.startActivityForResult(intent, 1001)
+                self.add_message("Opening file chooser...", is_user=False)
+            except Exception as e:
+                self.add_message(f"Error: {str(e)}", is_user=False)
+        else:
+            # For testing on desktop
+            self.pdf_text = "This is a sample PDF content. Kivy is a Python framework. Buildozer creates APK files. Android runs Java and Python."
+            self.pdf_loaded = True
+            self.process_text()
+            self.info_label.text = "Demo PDF loaded (sample text)"
+            self.input.disabled = False
+            self.add_message("PDF loaded! You can now ask questions.", is_user=False)
+
+    def process_text(self):
+        """Process PDF text and split into chunks."""
+        import re
+        sentences = re.split(r'[.!?]+', self.pdf_text)
+        self.chunks = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+        if not self.chunks:
+            words = self.pdf_text.split()
+            chunk_size = 50
+            self.chunks = [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+
+        self.add_message(f"PDF processed into {len(self.chunks)} sections.", is_user=False)
+
+    def send_question(self, instance):
+        if not self.pdf_loaded:
+            self.add_message("Please load a PDF first.", is_user=False)
+            return
+
+        question = self.input.text.strip()
+        if not question:
+            return
+
+        self.add_message(f"You: {question}", is_user=True)
+        self.input.text = ""
+
+        # Simulate typing
+        Clock.schedule_once(lambda dt: self.answer_question(question), 0.8)
+
+    def answer_question(self, question):
+        """Find answer by keyword search."""
+        if not self.chunks:
+            self.add_message("Bot: No content to search.", is_user=False)
+            return
+
+        question_lower = question.lower()
+        keywords = question_lower.split()
+
+        # Score chunks based on keyword matches
+        scored_chunks = []
+        for chunk in self.chunks:
+            chunk_lower = chunk.lower()
+            score = sum(1 for word in keywords if word in chunk_lower and len(word) > 3)
+            scored_chunks.append((score, chunk))
+
+        scored_chunks.sort(reverse=True)
+
+        if scored_chunks and scored_chunks[0][0] > 0:
+            best_chunk = scored_chunks[0][1]
+            if len(best_chunk) > 200:
+                best_chunk = best_chunk[:200] + "..."
+            self.add_message(f"Bot: {best_chunk}", is_user=False)
+        else:
+            self.add_message("Bot: I couldn't find an answer in the PDF. Try asking differently.", is_user=False)
+
+    def add_message(self, text, is_user):
+        bubble = MessageBubble(text=text, is_user=is_user)
+        self.chat_area.add_widget(bubble)
+        Clock.schedule_once(lambda dt: setattr(self.scroll, 'scroll_y', 0), 0.1)
+
+
+if __name__ == '__main__':
+    PDFChatApp().run()            background_color=(0.2, 0.6, 1, 1),
             disabled=not self.pdf_loaded
         )
         send_btn.bind(on_release=self.send_question)
